@@ -313,8 +313,9 @@ def main() -> None:
     print(f"Utworzono słownik gmin ({len(municipality_dict)} rekordów).")
     data = get_castles(county_dict=county_dict, municipality_dict=municipality_dict)
     geojson_dict = to_geojson(data)
-    with open("zamkisp.geojson", "w", encoding="utf-8") as f:
+    with open(f"zamkisp_{date.today().isoformat()}.geojson", "w", encoding="utf-8") as f:
         json.dump(geojson_dict, f, indent=2)
+    print("Done.")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 import json
 import re
 
@@ -208,8 +209,9 @@ def main() -> None:
     data = asyncio.run(get_pages_data(urls=pages_urls))
     print("writing data to geojson file.")
     geojson_dict = to_geojson(data)
-    with open("zamkinet.geojson", "w", encoding="utf-8") as f:
+    with open(f"zamkinet_{date.today().isoformat()}.geojson", "w", encoding="utf-8") as f:
         json.dump(geojson_dict, f, indent=2)
+    print("Done.")
 
 
 if __name__ == "__main__":
