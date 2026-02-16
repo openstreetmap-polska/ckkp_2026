@@ -8,6 +8,7 @@
 # exclude-newer = "2026-02-04T00:00:00Z"
 # ///
 
+import asyncio
 from collections.abc import Iterable
 from datetime import date
 import json
@@ -104,8 +105,8 @@ def to_geojson(rows: Iterable[CastleListRow]) -> dict:
     return result
 
 
-def get_details(client: httpx.Client, url: str) -> CastleListRowDetails:
-    response = client.get(url)
+async def get_details(client: httpx.AsyncClient, url: str) -> CastleListRowDetails:
+    response = await client.get(url)
     response.raise_for_status()
     soup = BeautifulSoup(markup=response.text, features="html.parser")
     main_section = soup.find(id="main_full")
@@ -149,15 +150,19 @@ def get_details(client: httpx.Client, url: str) -> CastleListRowDetails:
     )
 
 
-def get_castles(county_dict: dict[tuple[str, str], str], municipality_dict: dict[tuple[str, str, str], str]) -> list[CastleListRow]:
+async def get_castles(county_dict: dict[tuple[str, str], str], municipality_dict: dict[tuple[str, str, str], str]) -> list[CastleListRow]:
     results = []
     keep_running = True
     offset = 0
     step = 100
-    with httpx.Client() as client:
+    limits = httpx.Limits(
+        max_connections=3,
+        max_keepalive_connections=1,
+    )
+    async with httpx.AsyncClient(limits=limits) as client:
         while keep_running:
             url = URL_LISTA_TEMPLATE.format(limitstart=offset)
-            response = client.get(url=url)
+            response = await client.get(url=url)
             response.raise_for_status()
             print(f"get_castles() - offset: {offset} - Response status: {response.status_code} - url: {url}")
             soup = BeautifulSoup(markup=response.text, features="html.parser")
@@ -196,7 +201,7 @@ def get_castles(county_dict: dict[tuple[str, str], str], municipality_dict: dict
                             typ_oryginalny = val.text.strip()
                         case 8:
                             url = "https://zamkisp.pl" + val.find("a").get("href")
-                            details = get_details(client=client, url=url)
+                            details = await get_details(client=client, url=url)
                             woj = DICT_WOJEWODZTWA.get(kod_woj)
                             pow = county_dict.get((kod_woj, kod_pow))
                             gmi = municipality_dict.get((kod_woj, kod_pow, kod_gmi))
@@ -311,7 +316,7 @@ def main() -> None:
     print(f"Utworzono słownik powiatów ({len(county_dict)} rekordów).")
     municipality_dict = get_municipalities()
     print(f"Utworzono słownik gmin ({len(municipality_dict)} rekordów).")
-    data = get_castles(county_dict=county_dict, municipality_dict=municipality_dict)
+    data = asyncio.run(get_castles(county_dict=county_dict, municipality_dict=municipality_dict))
     geojson_dict = to_geojson(data)
     with open(f"zamkisp_{date.today().isoformat()}.geojson", "w", encoding="utf-8") as f:
         json.dump(geojson_dict, f, indent=2)
