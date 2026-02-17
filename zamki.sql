@@ -15,11 +15,36 @@ select *
 from st_read('/vsigzip//vsicurl/https://osm-countries-geojson.monicz.dev/osm-countries-0-00001.geojson.gz')
 ;
 
+select st_extent(geom) from countries where tags::json ->> 'ISO3166-1' = 'PL';
+
+create table overture_categories as
+select basic_category, count(*)
+from 's3://overturemaps-us-west-2/release/2026-01-21.0/theme=places/type=place/*.parquet' as places
+where
+  bbox.xmin >= 14.06
+  and bbox.xmax <= 24.03
+  and bbox.ymin >= 49.0
+  and bbox.ymax <= 55.04
+  and st_intersects(places.geometry, (select geom from countries where tags::json ->> 'ISO3166-1' = 'PL'))
+group by 1
+;
+
+select *
+from overture_categories
+order by 1
+;
+
+select *
+from overture_categories
+where basic_category like '%hist%'
+;
+
 drop table if exists overture_places;
 
 create table overture_places as
 select
   id as overture_id,
+  basic_category as overture_category,
   geometry,
   array_to_string([s.dataset for s in sources], ', ') as overture_source_datasets,
   names.primary as overture_name,
@@ -29,15 +54,17 @@ select
   operating_status as overture_operating_status
 from 's3://overturemaps-us-west-2/release/2026-01-21.0/theme=places/type=place/*.parquet' as places
 where
-  basic_category = 'castle'
-  and bbox.xmin >= 14.07
+  basic_category in ('castle', 'fort', 'ruins', 'ruin', 'historic_site', 'palace', 'landmark_and_historical_building', 'museum', 'history_museum')
+  and bbox.xmin >= 14.06
   and bbox.xmax <= 24.03
-  and bbox.ymin >= 49.03
-  and bbox.ymax <= 54.85
+  and bbox.ymin >= 49.0
+  and bbox.ymax <= 55.04
   and st_intersects(places.geometry, (select geom from countries where tags::json ->> 'ISO3166-1' = 'PL'))
 ;
 
-COPY(
+COPY overture_places TO '/mnt/nvme/git/ckkp_2026/overture_places_2026-01-21.gpkg' WITH (FORMAT gdal, DRIVER 'GPKG');
+
+create table castles as
 WITH 
 sp as (
   select distinct on(geom) *, row_number() over() as rn
@@ -117,6 +144,10 @@ left join lateral (
     order by ST_Distance_Spheroid(unioned.geom, overture_places.geometry)
     limit 1
 ) ov on true
---) TO '/mnt/nvme/git/ckkp_2026/zamki_deduplikowane_2026-02-16.geojson' WITH (FORMAT gdal, DRIVER 'GeoJSON')
-) TO '/mnt/nvme/git/ckkp_2026/zamki_deduplikowane_2026-02-16.gpkg' WITH (FORMAT gdal, DRIVER 'GPKG')
 ;
+
+select * from castles;
+
+COPY castles TO '/mnt/nvme/git/ckkp_2026/zamki_deduplikowane_2026-02-16.geojson' WITH (FORMAT gdal, DRIVER 'GeoJSON');
+
+COPY castles TO '/mnt/nvme/git/ckkp_2026/zamki_deduplikowane_2026-02-16.gpkg' WITH (FORMAT gdal, DRIVER 'GPKG');
