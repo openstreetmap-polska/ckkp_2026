@@ -151,3 +151,99 @@ select * from castles;
 COPY castles TO '/mnt/nvme/git/ckkp_2026/zamki_deduplikowane_2026-02-16.geojson' WITH (FORMAT gdal, DRIVER 'GeoJSON');
 
 COPY castles TO '/mnt/nvme/git/ckkp_2026/zamki_deduplikowane_2026-02-16.gpkg' WITH (FORMAT gdal, DRIVER 'GPKG');
+
+
+-- reanalysis
+-- in duckdb 1.5
+create or replace table overture_places as
+select *, st_point2d(st_y(geom), st_x(geom)) as point_2d
+from st_read('/mnt/nvme/git/ckkp_2026/overture_places_2026-01-21.gpkg')
+;
+
+create table castles as
+WITH 
+sp as (
+  select distinct on(geom) * exclude (OGC_FID), row_number() over() as rn, st_point2d(st_y(geom), st_x(geom)) as point_2d
+  from st_read('/mnt/nvme/git/ckkp_2026/zamkisp_2026-02-16.geojson')
+),
+net as (
+  select distinct on(geom) * exclude (OGC_FID), row_number() over() as rn, st_point2d(st_y(geom), st_x(geom)) as point_2d
+  from st_read('/mnt/nvme/git/ckkp_2026/zamkinet_2026-02-16.geojson')
+),
+matched as (
+  select sp.rn as sp_rn, net.rn as net_rn
+  from sp, net
+  where ST_DWithin_Spheroid(sp.point_2d, net.point_2d, 200.0)
+),
+not_matched_sp as (
+  select *
+  from sp
+  anti join matched on sp.rn=matched.sp_rn
+),
+not_matched_net as (
+  select *
+  from net
+  anti join matched on net.rn=matched.net_rn
+),
+matched_data as (
+  select
+    sp.nazwa as nazwa_sp,
+    net.nazwa as nazwa_net,
+    sp.url as url_sp,
+    net.url as url_net,
+    sp.zamek_id as zamek_id_sp,
+    sp.wojewodztwo,
+    sp.powiat,
+    sp.gmina,
+    sp.typ_oryginalny,
+    sp.typ_interpretowany,
+    sp.data_wprowadzenia,
+    sp.data_aktualizacji,
+    sp.opis,
+    net.stan_tekst,
+    net.stan_opis,
+    net.wstep,
+    net.parking,
+    net.trudnosc_odnalezienia_skala,
+    net.trudnosc_odnalezienia_tekst,
+    net.trudnosc_odnalezienia_opis,
+    net.trudnosc_dojscia_skala,
+    net.trudnosc_dojscia_tekst,
+    net.trudnosc_dojscia_opis,
+    net.ocena_skala,
+    net.ocena_tekst,
+    net.ocena_opis,
+    st_centroid(st_collect([sp.geom, net.geom])) as geom
+  from matched
+  join sp on sp.rn=matched.sp_rn
+  join net on net.rn=matched.net_rn
+),
+unioned as (
+  select * from matched_data
+  union all by name
+  select * exclude(rn) rename(nazwa as nazwa_sp, url as url_sp, zamek_id as zamek_id_sp) from not_matched_sp
+  union all by name
+  select * exclude(rn) rename(nazwa as nazwa_net, url as url_net) from not_matched_net
+)
+select
+  unioned.* exclude(point_2d),
+  case
+  	when typ_interpretowany in ('zniszczony', 'pozostałości') or stan_tekst = 'Brak śladów' then 'odrzucony automatycznie'
+  	else null
+  end ckkp_status,
+  ov.* exclude(geom, point_2d)
+from unioned
+left join lateral (
+    select *
+    from overture_places
+    where ST_DWithin_Spheroid(unioned.point_2d, overture_places.point_2d, 200.0)
+    order by ST_Distance_Spheroid(unioned.point_2d, overture_places.point_2d)
+    limit 1
+) ov on true
+;
+
+select * from castles;
+
+COPY castles TO '/mnt/nvme/git/ckkp_2026/zamki_deduplikowane_2026-02-16.geojson' WITH (FORMAT gdal, DRIVER 'GeoJSON');
+
+COPY castles TO '/mnt/nvme/git/ckkp_2026/zamki_deduplikowane_2026-02-16.gpkg' WITH (FORMAT gdal, DRIVER 'GPKG');
