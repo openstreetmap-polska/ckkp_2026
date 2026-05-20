@@ -1,0 +1,471 @@
+# /// script
+# requires-python = ">=3.13"
+# dependencies = [
+#     "duckdb==1.5.2",
+#     "pytz>=2026.1.post1",
+# ]
+# ///
+
+import time
+from datetime import datetime, timedelta
+from functools import wraps
+from pathlib import Path
+from typing import Callable
+
+import duckdb
+
+
+def connect_to_db(path: Path) -> duckdb.DuckDBPyConnection:
+    conn = duckdb.connect(
+        database=path, config={"storage_compatibility_version": "latest"}
+    )
+    conn.install_extension("httpfs")
+    conn.install_extension("spatial")
+    conn.load_extension("httpfs")
+    conn.load_extension("spatial")
+    for stmt in [
+        "SET preserve_insertion_order = false",
+        "SET geometry_always_xy = true",
+        "SET s3_region = 'us-west-2'",
+    ]:
+        conn.execute(stmt)
+    conn.execute("""
+create table if not exists steps (
+  name text primary key,
+  executed_at timestamp with time zone not null
+)
+    """)
+    return conn
+
+
+def step_executed_at(db: duckdb.DuckDBPyConnection, step_name: str) -> datetime | None:
+    db.execute("SELECT executed_at FROM steps WHERE name = ?", [step_name])
+    result = db.fetchone()
+    if result is None:
+        return None
+    else:
+        return result[0]
+
+
+def check_table_not_empty(db: duckdb.DuckDBPyConnection, table_name: str) -> None:
+    db.execute(f"SELECT count(*) FROM {table_name}")
+    cnt = db.fetchone()[0] # type: ignore
+    print(f"{table_name}: {cnt} rows")
+    if not cnt:
+        raise ValueError(f"{table_name} table shouldn't be empty after loading data")
+
+
+def step(step_name: str) -> Callable[[Callable[..., None]], Callable[..., None]]:
+    """Decorator for functions with each step that handles common stuff like registering that step was run and prints consistent messages."""
+
+    def decorator(func: Callable[..., None]) -> Callable[..., None]:
+        @wraps(func)
+        def wrapper(
+            db: duckdb.DuckDBPyConnection, *args, overwrite: bool = False, **kwargs
+        ) -> None:
+            if (
+                step_executed_at(db=db, step_name=step_name) is not None
+                and not overwrite
+            ):
+                print(f"🦥 Skipping step: {step_name}.")
+                return
+            print(f"🪏  Executing step: {step_name}...")
+            started_at = time.perf_counter()
+            db.begin()
+            db.execute("DELETE FROM steps WHERE name = ?", [step_name])
+            try:
+                result = func(db, *args, **kwargs)
+            except Exception:
+                db.rollback()
+                raise
+            db.execute(
+                "INSERT INTO steps(name, executed_at) VALUES(?, now())", [step_name]
+            )
+            db.commit()
+            elapsed = timedelta(seconds=time.perf_counter() - started_at)
+            print(f"✅️ Executing step: {step_name}. DONE in {elapsed}.")
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+@step("load_countries")
+def load_countries(db: duckdb.DuckDBPyConnection) -> None:
+    db.execute("DROP TABLE IF EXISTS countries")
+    db.execute("""
+create table countries as
+select st_transform(geom, 'OGC:CRS84') as geom, tags::json as tags
+from st_read('/vsigzip//vsicurl/https://osm-countries-geojson.monicz.dev/osm-countries-0-00001.geojson.gz')
+    """)
+    x = db.execute(
+        "select count(*) from countries where tags ->> 'ISO3166-1' = 'PL'"
+    ).fetchone()
+    if x is None or x[0] == 0:
+        raise RuntimeError(
+            "Something went wrong when loading countries. Poland is not in the list."
+        )
+
+
+@step("load_overture_places")
+def load_overture_places(
+    db: duckdb.DuckDBPyConnection,
+    *,
+    overture_release: str,
+) -> None:
+    db.execute("DROP TABLE IF EXISTS overture_places")
+    db.execute(f"""
+create table overture_places as
+select
+  id as overture_id,
+  basic_category as overture_category,
+  geometry,
+  st_transform(geometry, 'EPSG:2180') as geom_2180,
+  array_to_string([s.dataset for s in sources], ', ') as overture_source_datasets,
+  names.primary as overture_name,
+  confidence as overture_confidence,
+  array_to_string(websites, ' | ') as overture_websites,
+  array_to_string(socials, ' | ') as overture_socials,
+  operating_status as overture_operating_status
+from 's3://overturemaps-us-west-2/release/{overture_release}/theme=places/type=place/*.parquet' as places
+where
+  basic_category in ('castle', 'fort', 'ruins', 'ruin', 'historic_site', 'palace', 'landmark_and_historical_building', 'museum', 'history_museum')
+  and bbox.xmin >= 14.06
+  and bbox.xmax <= 24.03
+  and bbox.ymin >= 49.0
+  and bbox.ymax <= 55.04
+  and st_intersects(places.geometry, (select geom from countries where tags ->> 'ISO3166-1' = 'PL'))
+    """)
+    check_table_not_empty(db=db, table_name="overture_places")
+
+
+@step("export_overture_places")
+def export_overture_places(
+    db: duckdb.DuckDBPyConnection, *, export_gpkg_path: Path
+) -> None:
+    db.execute(
+        f"COPY (select * exclude(geom_2180) from overture_places) TO '{export_gpkg_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GPKG')"
+    )
+
+
+@step("load_castles")
+def load_castles(
+    db: duckdb.DuckDBPyConnection, *, zamkinet_path: Path, zamkisp_path: Path
+) -> None:
+    db.execute("DROP TABLE IF EXISTS zamkinet")
+    db.execute("DROP TABLE IF EXISTS zamkisp")
+    db.execute(f"""
+create table zamkinet as
+select distinct on(geom) * exclude (OGC_FID), row_number() over() as rn, st_transform(geom, 'EPSG:2180') as geom_2180
+from st_read('{zamkinet_path}')
+    """)
+    db.execute(f"""
+create table zamkisp as
+select distinct on(geom) * exclude (OGC_FID), row_number() over() as rn, st_transform(geom, 'EPSG:2180') as geom_2180
+from st_read('{zamkisp_path}')
+    """)
+    check_table_not_empty(db=db, table_name="zamkinet")
+    check_table_not_empty(db=db, table_name="zamkisp")
+
+
+@step("deduplicate_castles")
+def deduplicate_castles(db: duckdb.DuckDBPyConnection) -> None:
+    db.execute("DROP TABLE IF EXISTS castles")
+    db.execute("""
+create table castles as
+with
+matched as (
+  select sp.rn as sp_rn, net.rn as net_rn
+  from zamkisp sp, zamkinet net
+  where ST_DWithin(sp.geom_2180, net.geom_2180, 200.0)
+),
+not_matched_sp as (
+  select *
+  from zamkisp sp
+  anti join matched on sp.rn=matched.sp_rn
+),
+not_matched_net as (
+  select *
+  from zamkinet net
+  anti join matched on net.rn=matched.net_rn
+),
+matched_data as (
+  select
+    sp.nazwa as nazwa_sp,
+    net.nazwa as nazwa_net,
+    sp.url as url_sp,
+    net.url as url_net,
+    sp.zamek_id as zamek_id_sp,
+    sp.wojewodztwo,
+    sp.powiat,
+    sp.gmina,
+    sp.typ_oryginalny,
+    sp.typ_interpretowany,
+    sp.data_wprowadzenia,
+    sp.data_aktualizacji,
+    sp.opis,
+    net.stan_tekst,
+    net.stan_opis,
+    net.wstep,
+    net.parking,
+    net.trudnosc_odnalezienia_skala,
+    net.trudnosc_odnalezienia_tekst,
+    net.trudnosc_odnalezienia_opis,
+    net.trudnosc_dojscia_skala,
+    net.trudnosc_dojscia_tekst,
+    net.trudnosc_dojscia_opis,
+    net.ocena_skala,
+    net.ocena_tekst,
+    net.ocena_opis,
+    st_centroid(st_collect([sp.geom, net.geom])) as geom,
+    st_centroid(st_collect([sp.geom_2180, net.geom_2180])) as geom_2180
+  from matched
+  join zamkisp sp on sp.rn=matched.sp_rn
+  join zamkinet net on net.rn=matched.net_rn
+),
+unioned as (
+  select * from matched_data
+  union all by name
+  select * exclude(rn) rename(nazwa as nazwa_sp, url as url_sp, zamek_id as zamek_id_sp) from not_matched_sp
+  union all by name
+  select * exclude(rn) rename(nazwa as nazwa_net, url as url_net) from not_matched_net
+)
+select
+  row_number() over() as rn,
+  unioned.*,
+  case
+  	when typ_interpretowany in ('zniszczony', 'pozostałości') or stan_tekst = 'Brak śladów' then 'odrzucony automatycznie'
+  	else null
+  end status
+from unioned
+    """)
+    check_table_not_empty(db=db, table_name="castles")
+
+
+@step("export_castles")
+def export_castles(
+    db: duckdb.DuckDBPyConnection, *, export_gpkg_path: Path, export_geojson_path: Path
+) -> None:
+    db.execute(
+        f"COPY (select * exclude(geom_2180, rn) from castles) TO '{export_gpkg_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GPKG')"
+    )
+    db.execute(
+        f"COPY (select * exclude(geom_2180, rn) from castles) TO '{export_geojson_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GeoJSON')"
+    )
+
+
+@step("load_palaces")
+def load_palaces(db: duckdb.DuckDBPyConnection, *, dworysp_path: Path) -> None:
+    db.execute("DROP TABLE IF EXISTS palaces")
+    db.execute(f"""
+create table palaces as
+select distinct on(geom) * exclude (OGC_FID), row_number() over() as rn, st_transform(geom, 'EPSG:2180') as geom_2180
+from st_read('{dworysp_path.absolute().as_uri()}')               
+    """)
+    check_table_not_empty(db=db, table_name="palaces")
+
+
+@step("union_castles_palaces")
+def union_castles_palaces(db: duckdb.DuckDBPyConnection) -> None:
+    db.execute("DROP TABLE IF EXISTS castles_and_palaces")
+    db.execute("""
+create table castles_and_palaces as
+with
+matches as (
+    select castles.rn as castle_rn, palaces.rn as palace_rn
+    from castles, palaces
+    where ST_DWithin(castles.geom_2180, palaces.geom_2180, 25.0)               
+),
+matched_data as (
+    select
+        castles.status,
+        'K01.30.10 - Zamki' as object_type,
+        coalesce(castles.nazwa_sp, castles.nazwa_net, palaces.nazwa_sp) as name,
+        coalesce(castles.wojewodztwo, palaces.wojewodztwo) as province,
+        coalesce(castles.powiat, palaces.powiat) as district,
+        coalesce(castles.gmina, palaces.gmina) as municipality,
+        concat(castles.opis, e'\n\n' || palaces.opis, e'\n\n' || castles.stan_opis, e'\n\n' || castles.wstep, e'\n\n' || castles.parking, e'\n\n' || castles.trudnosc_odnalezienia_opis) as notes,
+        coalesce(castles.url_sp, palaces.url) as url_sp,
+        castles.url_net,
+        st_centroid(st_collect([castles.geom, palaces.geom])) as geom,
+        st_centroid(st_collect([castles.geom_2180, palaces.geom_2180])) as geom_2180
+    from matches
+    join castles on matches.castle_rn=castles.rn
+    join palaces on matches.palace_rn=palaces.rn
+),
+not_matched_palaces as (
+    select
+        palaces.nazwa_sp as name,
+        palaces.wojewodztwo as province,
+        palaces.powiat as district,
+        palaces.gmina as municipality,
+        palaces.opis as notes,
+        palaces.url as url_sp,
+        palaces.geom,
+        palaces.geom_2180
+    from palaces
+    anti join matches on palaces.rn=matches.palace_rn
+),
+not_matched_castles as (
+    select
+        'K01.30.10 - Zamki' as object_type,
+        castles.status,
+        coalesce(castles.nazwa_sp, castles.nazwa_net) as name,
+        castles.wojewodztwo as province,
+        castles.powiat as district,
+        castles.gmina as municipality,
+        concat(castles.opis, e'\n\n' || castles.stan_opis, e'\n\n' || castles.wstep, e'\n\n' || castles.parking, e'\n\n' || castles.trudnosc_odnalezienia_opis) as notes,
+        castles.url_sp,
+        castles.url_net,
+        castles.geom,
+        castles.geom_2180
+    from castles
+    anti join matches on castles.rn=matches.castle_rn
+),
+unioned as (
+    select * from matched_data
+    union all by name
+    select * from not_matched_castles
+    union all by name
+    select * from not_matched_palaces
+)
+select *
+from unioned
+    """)
+    check_table_not_empty(db=db, table_name="castles_and_palaces")
+
+
+@step("enrich_data")
+def enrich_data(db: duckdb.DuckDBPyConnection, *, addresses_path: Path) -> None:
+    db.execute("DROP TABLE IF EXISTS castles_and_palaces_enriched")
+    db.execute(f"""
+CREATE TABLE castles_and_palaces_enriched as
+with
+addresses as (
+    select
+        kod_pocztowy as post_code,
+        concat(wojewodztwo, ', ', powiat, ', ', gmina, ', ', miejscowosc, ', ' || ulica, ' ', numer_porzadkowy) as nearest_address,
+        geometry
+    from '{addresses_path.absolute().as_uri()}'
+),
+data as (
+    select
+        c.*,
+        ov.*,
+        addr.*
+    from castles_and_palaces c
+    left join lateral (
+        select
+            overture_name,
+            overture_websites,
+            overture_socials
+        from overture_places
+        where ST_DWithin(c.geom_2180, overture_places.geom_2180, 200.0)
+        order by ST_Distance(c.geom_2180, overture_places.geom_2180)
+        limit 1
+    ) ov on true
+    left join lateral (
+        select
+            post_code,
+            nearest_address
+        from addresses
+        where ST_DWithin(c.geom_2180, addresses.geometry, 200.0)
+        order by ST_Distance(c.geom_2180, addresses.geometry)
+        limit 1
+    ) addr on true
+)
+select
+    row_number() over() as id,
+    data.*
+from data
+    """)
+    check_table_not_empty(db=db, table_name="castles_and_palaces_enriched")
+
+
+@step("export_castles_and_palaces")
+def export_castles_and_palaces(
+    db: duckdb.DuckDBPyConnection, *, export_gpkg_path: Path, export_geojson_path: Path
+) -> None:
+    db.execute(
+        f"COPY (select * exclude(geom_2180) from castles_and_palaces_enriched) TO '{export_gpkg_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GPKG')"
+    )
+    db.execute(
+        f"COPY (select * exclude(geom_2180) from castles_and_palaces_enriched) TO '{export_geojson_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GeoJSON')"
+    )
+
+
+def main(*,
+    db_path: Path,
+    zamkinet_path: Path,
+    zamkisp_path: Path,
+    zamki_gpkg: Path,
+    zamki_geojson: Path,
+    dworysp_path: Path,
+    addresses_path: Path,
+    export_gpkg_path: Path,
+    export_geojson_path: Path,
+    overture_release: str,
+    overwrite: bool = False,
+) -> None:
+    print("🔌 Connecting to:", db_path)
+    db = connect_to_db(path=db_path)
+    load_countries(db=db, overwrite=overwrite)
+    load_overture_places(
+        db=db,
+        overture_release=overture_release,
+        overwrite=overwrite,
+    )
+    export_overture_places(db=db, export_gpkg_path=overture_gpkg, overwrite=overwrite)
+    load_castles(
+        db=db,
+        zamkinet_path=zamkinet_path,
+        zamkisp_path=zamkisp_path,
+        overwrite=overwrite,
+    )
+    deduplicate_castles(db=db)
+    export_castles(
+        db=db,
+        export_gpkg_path=zamki_gpkg,
+        export_geojson_path=zamki_geojson,
+    )
+    load_palaces(db=db, dworysp_path=dworysp_path)
+    union_castles_palaces(db=db)
+    enrich_data(db=db, addresses_path=addresses_path)
+    export_castles_and_palaces(
+        db=db,
+        export_gpkg_path=export_gpkg_path,
+        export_geojson_path=export_geojson_path,
+    )
+    db.close()
+    print("🗄️  Shutdown complete.")
+
+
+if __name__ == "__main__":
+    from sys import argv
+
+    db_path = Path("dane.duckdb")
+    overture_release = "2026-04-15.0"
+    overture_gpkg = db_path.parent / f"overture_places_{overture_release}.gpkg"
+    zamkinet_path = db_path.parent / "zamkinet_2026-02-16.geojson"
+    zamkisp_path = db_path.parent / "zamkisp_2026-02-16.geojson"
+    zamki_gpkg = db_path.parent / "zamki_deduplikowane_2026-02-16.gpkg"
+    zamki_geojson = db_path.parent / "zamki_deduplikowane_2026-02-16.geojson"
+    dworysp_path = db_path.parent / "dworysp_2026-02-19.geojson"
+    addresses_path = Path("/mnt/nvme/git/prg_convert/test_data/prg_dl_2180.parquet")
+    export_gpkg_path = db_path.parent / "lista_2026-05-20.gpkg"
+    export_geojson_path = db_path.parent / "lista_2026-05-20.geojson"
+    overwrite = argv[1].lower() == "overwrite" if len(argv) > 1 else False
+    main(
+        db_path=db_path,
+        zamkinet_path=zamkinet_path,
+        zamkisp_path=zamkisp_path,
+        zamki_gpkg=zamki_gpkg,
+        zamki_geojson=zamki_geojson,
+        dworysp_path=dworysp_path,
+        addresses_path=addresses_path,
+        export_gpkg_path=export_gpkg_path,
+        export_geojson_path=export_geojson_path,
+        overture_release=overture_release,
+        overwrite=overwrite,
+    )
