@@ -395,6 +395,79 @@ def export_castles_and_palaces(
     )
 
 
+@step("standardize_castles_and_palaces_data")
+def standardize_castles_and_palaces_data(db: duckdb.DuckDBPyConnection) -> None:
+    db.execute("DROP TABLE IF EXISTS standardized_castles_and_palaces")
+    db.execute("""
+create table standardized_castles_and_palaces as
+    with
+    woj(province) as (from read_csv('wojewodztwa.csv', header := false)),
+    pow(district) as (from read_csv('powiaty.csv', header := false)),
+    gmi(municipality) as (from read_csv('gminy.csv', header := false)),
+    data as (
+        select
+            status,
+            object_type,
+            name,
+            province,
+            trim(replace(district, ' miasto', '')) as district,
+            trim(replace(municipality, ' (miasto)', '')) as municipality,
+            trim(notes) as notes,
+            url_sp,
+            url_net,
+            geom,
+            overture_name,
+            overture_websites,
+            overture_socials,
+            post_code as postcode,
+            nearest_address
+        from castles_and_palaces_enriched as t
+    )
+    select
+        data.status,
+        data.object_type,
+        data.name,
+        'Polska' as country,
+        woj.province,
+        pow.district,
+        gmi.municipality,
+        data.postcode,
+        data.nearest_address,
+        data.notes,
+        null::text as state,
+        null::text as description,
+        null::text as accessibility,
+        null::text as veracity_score,
+        null::text as wikidata,
+        null::text as wikipedia,
+        null::text as osm_url,
+        null::text as osm_status,
+        null::int as "autor opracowania",
+        data.overture_name,
+        data.overture_websites,
+        data.overture_socials,
+        data.url_sp,
+        data.url_net,
+        data.geom
+    from data
+    left join woj on lower(data.province)=lower(woj.province)
+    left join pow on lower(data.district)=lower(pow.district)
+    left join gmi on lower(data.municipality)=lower(gmi.municipality)
+    """)
+
+
+@step("export_standardized_castles_and_palaces")
+def export_standardized_castles_and_palaces(
+    db: duckdb.DuckDBPyConnection, *, export_gpkg_path: Path, export_geojson_path: Path
+) -> None:
+    db.execute(
+        f"COPY (select * from standardized_castles_and_palaces) TO '{export_gpkg_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GPKG')"
+    )
+    db.execute(
+        f"COPY (select * from standardized_castles_and_palaces) TO '{export_geojson_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GeoJSON')"
+    )
+
+
 def main(*,
     db_path: Path,
     zamkinet_path: Path,
@@ -405,6 +478,8 @@ def main(*,
     addresses_path: Path,
     export_gpkg_path: Path,
     export_geojson_path: Path,
+    export_standardized_gpkg_path: Path,
+    export_standardized_geojson_path: Path,
     overture_release: str,
     overwrite: bool = False,
 ) -> None:
@@ -437,6 +512,12 @@ def main(*,
         export_gpkg_path=export_gpkg_path,
         export_geojson_path=export_geojson_path,
     )
+    standardize_castles_and_palaces_data(db=db)
+    export_standardized_castles_and_palaces(
+        db=db,
+        export_gpkg_path=export_standardized_gpkg_path,
+        export_geojson_path=export_standardized_geojson_path,
+    )
     db.close()
     print("🗄️  Shutdown complete.")
 
@@ -455,6 +536,8 @@ if __name__ == "__main__":
     addresses_path = Path("/mnt/nvme/git/prg_convert/test_data/prg_dl_2180.parquet")
     export_gpkg_path = db_path.parent / "lista_2026-05-20.gpkg"
     export_geojson_path = db_path.parent / "lista_2026-05-20.geojson"
+    export_standardized_gpkg_path = db_path.parent / "lista_std_2026-05-20.gpkg"
+    export_standardized_geojson_path = db_path.parent / "lista_std_2026-05-20.geojson"
     overwrite = argv[1].lower() == "overwrite" if len(argv) > 1 else False
     main(
         db_path=db_path,
@@ -466,6 +549,8 @@ if __name__ == "__main__":
         addresses_path=addresses_path,
         export_gpkg_path=export_gpkg_path,
         export_geojson_path=export_geojson_path,
+        export_standardized_gpkg_path=export_standardized_gpkg_path,
+        export_standardized_geojson_path=export_standardized_geojson_path,
         overture_release=overture_release,
         overwrite=overwrite,
     )
