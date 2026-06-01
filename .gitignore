@@ -1,0 +1,5 @@
+.venv
+venv/
+
+autorzy.csv
+konta.csv
