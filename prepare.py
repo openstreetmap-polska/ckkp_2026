@@ -49,7 +49,7 @@ def step_executed_at(db: duckdb.DuckDBPyConnection, step_name: str) -> datetime 
 
 def check_table_not_empty(db: duckdb.DuckDBPyConnection, table_name: str) -> None:
     db.execute(f"SELECT count(*) FROM {table_name}")
-    cnt = db.fetchone()[0] # type: ignore
+    cnt = db.fetchone()[0]  # type: ignore
     print(f"{table_name}: {cnt} rows")
     if not cnt:
         raise ValueError(f"{table_name} table shouldn't be empty after loading data")
@@ -442,7 +442,7 @@ create table standardized_castles_and_palaces as
         null::text as wikipedia,
         null::text as osm_url,
         null::text as osm_status,
-        null::int as "autor opracowania",
+        null::text as autor_opracowania,
         data.overture_name,
         data.overture_websites,
         data.overture_socials,
@@ -468,7 +468,73 @@ def export_standardized_castles_and_palaces(
     )
 
 
-def main(*,
+@step("assign_standardized_castles_and_palaces_and_export")
+def assign_standardized_castles_and_palaces_and_export(
+    db: duckdb.DuckDBPyConnection, *, export_gpkg_path: Path, group_size: int = 250
+) -> None:
+    db.execute("UPDATE standardized_castles_and_palaces SET autor_opracowania = NULL")
+    db.execute(f"""
+CREATE TEMP TABLE rows_to_update AS
+with recursive
+settings as (
+    select
+        {group_size} as group_size,
+        ceil((select count(*) from standardized_castles_and_palaces) / group_size)::int as number_of_groups
+),
+groups as (
+    select
+        1 as group_number,
+        (select group_size from settings) * (group_number - 1) as rn_gt,
+        (select group_size from settings) * (group_number) as rn_lte
+    union all
+    select
+        group_number + 1,
+        (select group_size from settings) * (group_number),
+        (select group_size from settings) * (group_number + 1)
+    from groups
+    where group_number <= (select number_of_groups - 1 from settings)
+),
+people as (
+    select
+        column0 as autor_opracowania,
+        row_number() over() as rn
+    from read_csv('autorzy.csv', header := false)
+),
+groups_with_people as (
+    select
+        groups.*,
+        people.autor_opracowania
+    from groups
+    left join people on groups.group_number = people.rn
+),
+t as (
+    select
+        t.rowid,
+        row_number() over() as rn
+    from standardized_castles_and_palaces as t 
+),
+mapping as (
+    select
+        t.rowid as id,
+        g.autor_opracowania as new_autor
+    from t
+    join groups_with_people as g on t.rn > g.rn_gt and t.rn <= g.rn_lte
+)
+select * from mapping
+    """)
+    db.execute("""
+update standardized_castles_and_palaces as t
+set autor_opracowania = new_autor
+from rows_to_update
+where t.rowid = id
+    """)
+    db.execute(
+        f"COPY (select * from standardized_castles_and_palaces) TO '{export_gpkg_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GPKG')"
+    )
+
+
+def main(
+    *,
     db_path: Path,
     zamkinet_path: Path,
     zamkisp_path: Path,
@@ -480,6 +546,7 @@ def main(*,
     export_geojson_path: Path,
     export_standardized_gpkg_path: Path,
     export_standardized_geojson_path: Path,
+    export_assigned_gpkg_path: Path,
     overture_release: str,
     overwrite: bool = False,
 ) -> None:
@@ -518,6 +585,10 @@ def main(*,
         export_gpkg_path=export_standardized_gpkg_path,
         export_geojson_path=export_standardized_geojson_path,
     )
+    assign_standardized_castles_and_palaces_and_export(
+        db=db,
+        export_gpkg_path=export_assigned_gpkg_path,
+    )
     db.close()
     print("🗄️  Shutdown complete.")
 
@@ -538,6 +609,7 @@ if __name__ == "__main__":
     export_geojson_path = db_path.parent / "lista_2026-05-20.geojson"
     export_standardized_gpkg_path = db_path.parent / "lista_std_2026-05-20.gpkg"
     export_standardized_geojson_path = db_path.parent / "lista_std_2026-05-20.geojson"
+    export_assigned_gpkg_path = db_path.parent / "lista_assigned_2026-05-20.gpkg"
     overwrite = argv[1].lower() == "overwrite" if len(argv) > 1 else False
     main(
         db_path=db_path,
@@ -551,6 +623,7 @@ if __name__ == "__main__":
         export_geojson_path=export_geojson_path,
         export_standardized_gpkg_path=export_standardized_gpkg_path,
         export_standardized_geojson_path=export_standardized_geojson_path,
+        export_assigned_gpkg_path=export_assigned_gpkg_path,
         overture_release=overture_release,
         overwrite=overwrite,
     )
