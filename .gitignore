@@ -1,5 +1,8 @@
 .venv
 venv/
+__marimo__
+
+.env
 
 autorzy.csv
 konta.csv
