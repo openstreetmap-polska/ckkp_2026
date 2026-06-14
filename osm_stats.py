@@ -35,7 +35,11 @@ def _(duckdb):
         "addr:housenumber" as housenumber,
         "addr:postcode" as postcode,
         wikidata,
-        wikipedia
+        wikipedia,
+        castle_type,
+        heritage,
+        tourism,
+        "heritage:operator" as heritage_operator
     FROM ST_Read('zamki_dwory_osm_wszystkie_01_06_2026.gpkg')
     """)
     return
@@ -110,6 +114,58 @@ def _(dane_osm, mo):
     _grp_by_building = mo.sql(
         f"""
         SELECT building, count(*) as number_of_objects FROM dane_osm GROUP BY building order by 2 desc nulls first
+        """
+    )
+    return
+
+
+@app.cell
+def _(dane_osm, mo):
+    _df = mo.sql(
+        f"""
+        SELECT castle_type, count(*) as no_of_objects
+        FROM dane_osm
+        GROUP BY castle_type
+        order by no_of_objects desc
+        """
+    )
+    return
+
+
+@app.cell
+def _(dane_osm, mo):
+    _df = mo.sql(
+        f"""
+        SELECT heritage, count(*) as no_of_objects
+        FROM dane_osm
+        GROUP BY heritage
+        order by no_of_objects desc
+        """
+    )
+    return
+
+
+@app.cell
+def _(dane_osm, mo):
+    _df = mo.sql(
+        f"""
+        SELECT tourism, count(*) as no_of_objects
+        FROM dane_osm
+        GROUP BY tourism
+        order by no_of_objects desc
+        """
+    )
+    return
+
+
+@app.cell
+def _(dane_osm, mo):
+    _df = mo.sql(
+        f"""
+        SELECT heritage_operator, count(*) as no_of_objects
+        FROM dane_osm
+        GROUP BY heritage_operator
+        order by no_of_objects desc
         """
     )
     return
