@@ -162,6 +162,8 @@ def main(
         logout(client=client, x_access_token=token)
     features = data["data"]["features"]
     print(f"There are {len(features)} features in response.")
+    if len(features) == 0:
+        raise ValueError("Something went wrong. Data source returned 0 features.")
     finished_features = [f for f in features if f["properties"]["status"] == "opracowany"]
     duplicate_features = [f for f in features if f["properties"]["status"] == "duplikat"]
     in_progress_features = [f for f in features if f["properties"]["status"] == "w trakcie"]

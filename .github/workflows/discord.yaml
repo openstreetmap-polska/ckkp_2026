@@ -1,0 +1,24 @@
+name: send message to discord
+
+on:
+  schedule:
+  - cron: "37 3 * * *"
+
+jobs:
+  uv-example:
+    name: python
+    runs-on: ubuntu-latest
+
+    steps:
+    # - uses: actions/checkout@v6
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+    - name: Run script
+      run: uv run https://github.com/openstreetmap-polska/ckkp_2026/raw/refs/heads/main/usemaps_get_data.py
+      env:
+        base_url: ${{ secrets.BASE_URL }}
+        password: ${{ secrets.PASSWORD }}
+        username: ${{ secrets.USERNAME }}
+        webhook_url: ${{ secrets.WEBHOOK_URL }}
