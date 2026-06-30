@@ -174,7 +174,7 @@ def main(
         if datetime.fromisoformat(f["properties"]["update_datetime"]).date() == (date.today() - timedelta(days=1))
     ]
     authors = Counter((*(f["properties"]["autor_opracowania"] for f in finished_features), *(f["properties"]["autor_opracowania"] for f in duplicate_features)))
-    top_authors = authors.most_common(6)
+    top_authors = authors.most_common(10)
     if webhook_url:
         send_discord_message(
             webhook_url=webhook_url,
