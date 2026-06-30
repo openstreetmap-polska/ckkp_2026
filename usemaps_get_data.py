@@ -79,7 +79,9 @@ def send_discord_message(
     num_finished_features: int,
     num_duplicate_features: int,
     num_in_progress_features: int,
+    num_too_difficult_features: int,
     num_finished_castles: int,
+    num_finished_defensive_manors: int,
     top_authors: Iterable[tuple[str, int]],
 ) -> None:
     client = (
@@ -91,42 +93,54 @@ def send_discord_message(
     description = "Autorzy mający najwięcej opracowanych obiektów:\n"
     for idx, author in enumerate(top_authors, start=1):
         description += f"{idx}. {author[0]} ({author[1]})\n"
+    payload = {
+        "embeds": [
+            {
+                "color": 3066993,
+                "title": "📊  Podsumowanie",
+                "description": description,
+                "fields": [
+                    {
+                        "name": "📅  Liczba obiektów edytowanych wczoraj",
+                        "value": f"```🔹 {num_features_updated_yesterday}```",
+                        "inline": True,
+                    },
+                    {
+                        "name": "✏️  Liczba obiektów oznaczonych 'w trakcie'",
+                        "value": f"```🔹 {num_in_progress_features}```",
+                        "inline": True,
+                    },
+                    {
+                        "name": "❌️  Liczba obiektów oznaczonych 'za trudny'",
+                        "value": f"```🔹 {num_too_difficult_features}```",
+                        "inline": True,
+                    },
+                    {
+                        "name": "🏰  Liczba opracowanych zamków",
+                        "value": f"```🔹 {num_finished_castles}```",
+                        "inline": True,
+                    },
+                    {
+                        "name": "🏠️  Liczba opracowanych dworów obronnych",
+                        "value": f"```🔹 {num_finished_defensive_manors}```",
+                        "inline": True,
+                    },
+                    {
+                        "name": "✅️  Liczba obiektów ukończonych",
+                        "value": f"```\n🔹 opracowany: {num_finished_features}\n🔹 duplikat: {num_duplicate_features}\n```",
+                        "inline": True,
+                    },
+                ],
+                "footer": {"text": f"Wiadomość wygenerowana automatycznie • Dane pobrane o: {dt.isoformat(sep=' ', timespec="seconds")}."},
+            },
+        ],
+    }
     print("Sending discord message...")
+    breakpoint()
     (
         client
         .post(webhook_url)
-        .body_json({
-            "embeds": [
-                {
-                    "color": 3066993,
-                    "title": "📊  Podsumowanie",
-                    "description": description,
-                    "fields": [
-                        {
-                            "name": "📅  Liczba obiektów edytowanych wczoraj",
-                            "value": f"```🔹 {num_features_updated_yesterday}```",
-                            "inline": True,
-                        },
-                        {
-                            "name": "✏️  Liczba obiektów oznaczonych 'w trakcie'",
-                            "value": f"```🔹 {num_in_progress_features}```",
-                            "inline": True,
-                        },
-                        {
-                            "name": "🏰  Liczba opracowanych zamków",
-                            "value": f"```🔹 {num_finished_castles}```",
-                            "inline": True,
-                        },
-                        {
-                            "name": "✅️  Liczba obiektów ukończonych",
-                            "value": f"```🔹 opracowany: {num_finished_features}\n🔹 duplikat: {num_duplicate_features}```",
-                            "inline": True,
-                        },
-                    ],
-                    "footer": {"text": f"Wiadomość wygenerowana automatycznie • Dane pobrane o: {dt.isoformat(sep=' ', timespec="seconds")}."},
-                },
-            ],
-        })
+        .body_json(payload)
         .build()
         .send()
     )
@@ -167,7 +181,9 @@ def main(
     finished_features = [f for f in features if f["properties"]["status"] == "opracowany"]
     duplicate_features = [f for f in features if f["properties"]["status"] == "duplikat"]
     in_progress_features = [f for f in features if f["properties"]["status"] == "w trakcie"]
+    too_difficult_features = [f for f in features if f["properties"]["status"] == "za trudny"]
     finished_castles = [f for f in finished_features if f["properties"]["object_type"] == "K01.30.10 - Zamki"]
+    finished_defensive_manors = [f for f in finished_features if f["properties"]["object_type"] == "K01.30.20 - Dwory obronne"]
     features_updated_yesterday = [
         f
         for f in features
@@ -182,8 +198,10 @@ def main(
             num_duplicate_features=len(duplicate_features),
             num_features_updated_yesterday=len(features_updated_yesterday),
             num_finished_castles=len(finished_castles),
+            num_finished_defensive_manors=len(finished_defensive_manors),
             num_finished_features=len(finished_features),
             num_in_progress_features=len(in_progress_features),
+            num_too_difficult_features=len(too_difficult_features),
             top_authors=top_authors,
         )
 
