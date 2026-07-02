@@ -136,7 +136,6 @@ def send_discord_message(
         ],
     }
     print("Sending discord message...")
-    breakpoint()
     (
         client
         .post(webhook_url)
