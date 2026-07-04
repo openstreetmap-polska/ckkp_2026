@@ -76,13 +76,10 @@ def send_discord_message(
     webhook_url: str,
     dt: datetime,
     num_features_updated_yesterday: int,
-    num_finished_features: int,
-    num_duplicate_features: int,
-    num_in_progress_features: int,
-    num_too_difficult_features: int,
     num_finished_castles: int,
     num_finished_defensive_manors: int,
     top_authors: Iterable[tuple[str, int]],
+    status_count: Iterable[tuple[str, int]],
 ) -> None:
     client = (
         SyncClientBuilder()
@@ -93,6 +90,10 @@ def send_discord_message(
     description = "Autorzy mający najwięcej opracowanych obiektów:\n"
     for idx, author in enumerate(top_authors, start=1):
         description += f"{idx}. {author[0]} ({author[1]})\n"
+    statuses = "```\n"
+    for status, count in status_count:
+        statuses += f"🔹 {status}: {count} \n" if status else f"🔹 <brak>: {count} \n"
+    statuses += "```"
     payload = {
         "embeds": [
             {
@@ -106,16 +107,6 @@ def send_discord_message(
                         "inline": True,
                     },
                     {
-                        "name": "✏️  Liczba obiektów oznaczonych 'w trakcie'",
-                        "value": f"```🔹 {num_in_progress_features}```",
-                        "inline": True,
-                    },
-                    {
-                        "name": "❌️  Liczba obiektów oznaczonych 'za trudny'",
-                        "value": f"```🔹 {num_too_difficult_features}```",
-                        "inline": True,
-                    },
-                    {
                         "name": "🏰  Liczba opracowanych zamków",
                         "value": f"```🔹 {num_finished_castles}```",
                         "inline": True,
@@ -126,8 +117,8 @@ def send_discord_message(
                         "inline": True,
                     },
                     {
-                        "name": "✅️  Liczba obiektów ukończonych",
-                        "value": f"```\n🔹 opracowany: {num_finished_features}\n🔹 duplikat: {num_duplicate_features}\n```",
+                        "name": "✅️  Liczba obiektów wg statusu:",
+                        "value": statuses,
                         "inline": True,
                     },
                 ],
@@ -179,8 +170,6 @@ def main(
         raise ValueError("Something went wrong. Data source returned 0 features.")
     finished_features = [f for f in features if f["properties"]["status"] == "opracowany"]
     duplicate_features = [f for f in features if f["properties"]["status"] == "duplikat"]
-    in_progress_features = [f for f in features if f["properties"]["status"] == "w trakcie"]
-    too_difficult_features = [f for f in features if f["properties"]["status"] == "za trudny"]
     finished_castles = [f for f in finished_features if f["properties"]["object_type"] == "K01.30.10 - Zamki"]
     finished_defensive_manors = [f for f in finished_features if f["properties"]["object_type"] == "K01.30.20 - Dwory obronne"]
     features_updated_yesterday = [
@@ -188,20 +177,21 @@ def main(
         for f in features
         if datetime.fromisoformat(f["properties"]["update_datetime"]).date() == (date.today() - timedelta(days=1))
     ]
-    authors = Counter((*(f["properties"]["autor_opracowania"] for f in finished_features), *(f["properties"]["autor_opracowania"] for f in duplicate_features)))
+    authors = Counter((
+            *(f["properties"]["autor_opracowania"] for f in finished_features),
+            *(f["properties"]["autor_opracowania"] for f in duplicate_features),
+    ))
     top_authors = authors.most_common(10)
+    status_count = Counter((f["properties"]["status"] for f in features))
     if webhook_url:
         send_discord_message(
             webhook_url=webhook_url,
             dt=now,
-            num_duplicate_features=len(duplicate_features),
             num_features_updated_yesterday=len(features_updated_yesterday),
             num_finished_castles=len(finished_castles),
             num_finished_defensive_manors=len(finished_defensive_manors),
-            num_finished_features=len(finished_features),
-            num_in_progress_features=len(in_progress_features),
-            num_too_difficult_features=len(too_difficult_features),
             top_authors=top_authors,
+            status_count=status_count.items(),
         )
 
 
