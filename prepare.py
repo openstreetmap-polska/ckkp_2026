@@ -3,16 +3,78 @@
 # dependencies = [
 #     "duckdb==1.5.2",
 #     "pytz>=2026.1.post1",
+#     "pyreqwest>=0.12.0",
 # ]
 # ///
 
+import os
 import time
 from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
-from typing import Callable
+from typing import Callable, cast
 
 import duckdb
+from pyreqwest.client import SyncClientBuilder, SyncClient
+
+try:
+    import dotenv
+    if dotenv.load_dotenv():
+        print(".env loaded.")
+except ImportError:
+    print("python-dotenv not installed. Relying on env variables set externally.")
+
+
+def login(client: SyncClient, username: str, password: str) -> str:
+    """Logs in to usemaps and returns session token."""
+    print("Sending request to log in...")
+    response = (
+        client
+        .post("/api/login")
+        .body_json({"data": {"username_or_email": username, "password": password}})
+        .build()
+        .send()
+    )
+    cookie = response.get_header("set-cookie")
+    if not cookie:
+        raise ValueError("Server did not return session token.")
+    return cookie.split(";")[0].split("=")[1]
+
+
+def logout(client: SyncClient, x_access_token: str) -> None:
+    print("Sending request to log out...")
+    (
+        client
+        .get("/api/logout")
+        .header(key="x-access-token", value=x_access_token, is_sensitive=True)
+        .build()
+        .send()
+    )
+
+
+def get_layer_data(client: SyncClient, x_access_token: str, dataset_name: str) -> dict:
+    print(f"Sending request to get data for dataset: {dataset_name}...")
+    return (
+        client
+        .post(f"/api/v2/datasources-features/read/{dataset_name}")
+        .header(key="x-access-token", value=x_access_token, is_sensitive=True)
+        .body_json({"data": {}})
+        .query(dict(
+            with_features=True,
+            with_geometry=True,
+            with_count=False,
+            with_total_count=False,
+            with_total_count_without_filter=False,
+            with_features_bbox=False,
+            with_collection_bbox=False,
+            ids_only=False,
+            ids_descs_only=False,
+            with_relation_values=False,
+        ))
+        .build()
+        .send()
+        .json()
+    )
 
 
 def connect_to_db(path: Path) -> duckdb.DuckDBPyConnection:
@@ -533,6 +595,172 @@ where t.rowid = id
     )
 
 
+@step("load_boundaries")
+def load_boundaries(
+    db: duckdb.DuckDBPyConnection,
+    *,
+    woj_shp_path: Path,
+    pow_shp_path: Path,
+    gmi_shp_path: Path,
+) -> None:
+    db.execute("DROP TABLE IF EXISTS woj")
+    db.execute("DROP TABLE IF EXISTS pow")
+    db.execute("DROP TABLE IF EXISTS gmi")
+    db.execute(f"""
+create table woj as
+select JPT_KOD_JE as kod_woj, JPT_NAZWA_ as name_woj, st_transform(geom, 'epsg:4258', 'epsg:4326') as geom
+from st_read('{woj_shp_path.absolute().as_uri()}')        
+    """)
+    db.execute(f"""
+create table pow as
+select JPT_KOD_JE as kod_pow, replace(JPT_NAZWA_, 'powiat ', '') as name_pow, st_transform(geom, 'epsg:4258', 'epsg:4326') as geom
+from st_read('{pow_shp_path.absolute().as_uri()}')        
+    """)
+    db.execute(f"""
+create table gmi as
+select JPT_KOD_JE as kod_gmi, JPT_NAZWA_ as name_gmi, st_transform(geom, 'epsg:4258', 'epsg:4326') as geom
+from st_read('{gmi_shp_path.absolute().as_uri()}')        
+    """)
+
+
+@step("load_usemaps_data")
+def load_usemaps_data(db: duckdb.DuckDBPyConnection) -> None:
+    username = os.getenv("username")
+    password = os.getenv("password")
+    base_url = os.getenv("base_url")
+    if not username:
+        raise ValueError("You need username as env variable for the script to work.")
+    if not password:
+        raise ValueError("You need password as env variable for the script to work.")
+    if not base_url:
+        raise ValueError("You need base_url as env variable for the script to work.")
+    with (
+        SyncClientBuilder()
+        .error_for_status()
+        .timeout(timedelta(minutes=5))
+        .base_url(base_url)
+        .build() as client
+    ):
+        token = login(client=client, username=username, password=password)
+        data = get_layer_data(client=client, x_access_token=token, dataset_name="datasources_lista_assigned_2026_05_20")  # hardcoded dataset id
+        logout(client=client, x_access_token=token)
+    features: list[dict] = data["data"]["features"]
+    if len(features) == 0:
+        raise ValueError("Usemaps returned 0 features.")
+    else:
+        print(f"There are {len(features)} features in response.")
+    db.execute("DROP TABLE IF EXISTS usemaps_features")
+    db.execute("""
+CREATE TABLE usemaps_features(
+id int,
+accessibility text,
+--attachments_count text,
+autor_opracowania text,
+country text,
+create_datetime text,
+--create_user text,
+description text,
+district text,
+--history_count text,
+municipality text,
+name text,
+nearest_address text,
+notes text,
+--notes_count text,
+object_type text,
+osm_status text,
+osm_url text,
+overture_name text,
+overture_socials text,
+overture_websites text,
+postcode text,
+province text,
+state text,
+status text,
+update_datetime text,
+--update_user text,
+url_net text,
+url_sp text,
+veracity_score text,
+wikidata text,
+wikipedia text,
+geom Geometry('EPSG:4326'),
+geom_2180 Geometry('EPSG:2180')
+)
+""")
+    for feature in features:
+        coords: list[float] = feature["geometry"]["coordinates"]
+        geom = f"POINT({coords[0]} {coords[1]})"
+        p = cast(dict, feature["properties"]).copy()
+        p.pop("attachments_count")
+        p.pop("create_user")
+        p.pop("history_count")
+        p.pop("notes_count")
+        p.pop("update_user")
+        db.execute(f"INSERT INTO usemaps_features VALUES({', '.join(['?']*28)}, ST_Transform(?::GEOMETRY, 'EPSG:4326', 'EPSG:2180'))", [feature["id"], *p.values(), geom, geom])
+    check_table_not_empty(db=db, table_name="usemaps_features")
+
+
+@step("prepare_nonspatial_list")
+def prepare_nonspatial_list(db: duckdb.DuckDBPyConnection, *, addresses_path: Path) -> None:
+    db.execute("DROP TABLE IF EXISTS castles_palaces_list_nonspatial")
+    db.execute(f"""
+CREATE TABLE castles_palaces_list_nonspatial as
+with
+addresses as (
+    select
+        kod_pocztowy as post_code,
+        concat(wojewodztwo, ', ', powiat, ', ', gmina, ', ', miejscowosc, ', ' || ulica, ' ', numer_porzadkowy) as nearest_address,
+        geometry
+    from '{addresses_path.absolute().as_uri()}'
+),
+data as (
+    select
+        f.object_type,
+        f.name,
+        f.country,
+        woj.name_woj as province,
+        pow.name_pow as district,
+        gmi.name_gmi as municipality,
+        addr.post_code as post_code,
+        addr.nearest_address,
+        f.state,
+        f.accessibility,
+        f.veracity_score,
+        f.description,
+        f.wikipedia,
+        f.wikidata
+    from usemaps_features f
+    left join woj on ST_Intersects(f.geom, woj.geom)
+    left join pow on ST_Intersects(f.geom, pow.geom)
+    left join gmi on ST_Intersects(f.geom, gmi.geom)
+    left join lateral (
+        select
+            post_code,
+            nearest_address
+        from addresses
+        where ST_DWithin(f.geom_2180, addresses.geometry, 2000.0)
+        order by ST_Distance(f.geom_2180, addresses.geometry)
+        limit 1
+    ) addr on true
+    where 
+        (object_type in ('K01.30.20 - Dwory obronne', 'K01.30.10 - Zamki', 'K01.20.20 - Dwory szlacheckie', 'K01.20.30 - Dwory inne') and status = 'opracowany')
+        or
+        (object_type = 'K01.20.10 - Pałace' and status = 'opracowany pal')
+)
+select *
+from data
+""")
+    check_table_not_empty(db=db, table_name="castles_palaces_list_nonspatial")
+
+
+@step("export_nonspatial_list")
+def export_nonspatial_list(db: duckdb.DuckDBPyConnection, *, export_csv_path: Path) -> None:
+    db.execute(
+        f"COPY (select * from castles_palaces_list_nonspatial) TO '{export_csv_path.absolute().as_uri()}' WITH (FORMAT CSV, HEADER)"
+    )
+
+
 def main(
     *,
     db_path: Path,
@@ -548,6 +776,10 @@ def main(
     export_standardized_geojson_path: Path,
     export_assigned_gpkg_path: Path,
     overture_release: str,
+    woj_shp_path: Path,
+    pow_shp_path: Path,
+    gmi_shp_path: Path,
+    export_nonspatial_csv_path: Path,
     overwrite: bool = False,
 ) -> None:
     print("🔌 Connecting to:", db_path)
@@ -589,6 +821,15 @@ def main(
         db=db,
         export_gpkg_path=export_assigned_gpkg_path,
     )
+    load_boundaries(
+        db=db,
+        woj_shp_path=woj_shp_path,
+        pow_shp_path=pow_shp_path,
+        gmi_shp_path=gmi_shp_path,
+    )
+    load_usemaps_data(db=db)
+    prepare_nonspatial_list(db=db, addresses_path=addresses_path)
+    export_nonspatial_list(db=db, export_csv_path=export_nonspatial_csv_path)
     db.close()
     print("🗄️  Shutdown complete.")
 
@@ -610,6 +851,10 @@ if __name__ == "__main__":
     export_standardized_gpkg_path = db_path.parent / "lista_std_2026-05-20.gpkg"
     export_standardized_geojson_path = db_path.parent / "lista_std_2026-05-20.geojson"
     export_assigned_gpkg_path = db_path.parent / "lista_assigned_2026-05-20.gpkg"
+    woj_shp_path = db_path.parent / "granice" / "A01_Granice_wojewodztw.shp"
+    pow_shp_path = db_path.parent / "granice" / "A02_Granice_powiatow.shp"
+    gmi_shp_path = db_path.parent / "granice" / "A03_Granice_gmin.shp"
+    export_nonspatial_csv_path = db_path.parent / "lista_tabelaryczna_2026-07-18.csv"
     overwrite = argv[1].lower() == "overwrite" if len(argv) > 1 else False
     main(
         db_path=db_path,
@@ -625,5 +870,9 @@ if __name__ == "__main__":
         export_standardized_geojson_path=export_standardized_geojson_path,
         export_assigned_gpkg_path=export_assigned_gpkg_path,
         overture_release=overture_release,
+        woj_shp_path=woj_shp_path,
+        pow_shp_path=pow_shp_path,
+        gmi_shp_path=gmi_shp_path,
+        export_nonspatial_csv_path=export_nonspatial_csv_path,
         overwrite=overwrite,
     )
