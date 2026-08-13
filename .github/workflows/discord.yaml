@@ -1,8 +1,8 @@
 name: send message to discord
 
 on:
-  schedule:
-  - cron: "37 3 * * *"
+  workflow_dispatch:
+
 
 jobs:
   uv-example:
