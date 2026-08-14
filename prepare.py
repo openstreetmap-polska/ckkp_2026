@@ -761,6 +761,71 @@ def export_nonspatial_list(db: duckdb.DuckDBPyConnection, *, export_csv_path: Pa
     )
 
 
+@step("load_reviewed_data")
+def load_reviewed_data(db: duckdb.DuckDBPyConnection, *, import_gpkg_path: Path) -> None:
+    db.execute("DROP TABLE IF EXISTS list_reviewed")
+    db.execute("""
+        create temporary table t as
+        select *, split(object_type, ' -')[1] as ot
+        from st_read(?)""",
+        (import_gpkg_path.absolute().as_uri(),)
+    )
+    db.execute("select count(*) from t")
+    num = db.fetchone()[0] # type: ignore
+    rids = generate_random_ids(num)
+    db.execute("create temporary table i(rid text not null)")
+    db.executemany("insert into i(rid) values (?)", [(rid,) for rid in rids])
+    db.execute("""
+    create table list_reviewed as
+    select
+        ST_ASTEXT(geom) as wkt_wgs84,
+        ST_X(geom) as x_wgs84,
+        ST_Y(geom) as y_wgs84,
+        country,
+        province,
+        district,
+        municipality,
+        post_code as postcode,
+        object_type,
+        veracity_score,
+        accessibility,
+        state,
+        concat(ot, '.', rid) as otar_id,
+        name,
+        description,
+        wikidata,
+        wikipedia,
+        now()::date as published,
+        geom
+    from t positional join i
+    """)
+    check_table_not_empty(db=db, table_name="list_reviewed")
+
+
+@step("export_reviewed_formatted_data")
+def export_reviewed_formatted_data(db: duckdb.DuckDBPyConnection, *, export_gpkg_path: Path) -> None:
+    db.execute(
+        f"COPY (select * from list_reviewed) TO '{export_gpkg_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GPKG')"
+    )
+
+
+def generate_random_ids(num_ids: int) -> list[str]:
+    """Identifier generator
+    CHARSET: uppercase letters excluding I and O; digits 1-9 excluding 0
+    Length: 6
+    """
+    import secrets
+
+    CHARSET = 'ABCDEFGHJKLMNPQRSTUVWXYZ123456789'
+    ID_LENGTH = 6
+
+    def generate_id(length: int = ID_LENGTH) -> str:
+        return ''.join(secrets.choice(CHARSET) for _ in range(length))
+
+    result = [generate_id() for _ in range(num_ids)]
+    return result
+
+
 def main(
     *,
     db_path: Path,
@@ -780,6 +845,8 @@ def main(
     pow_shp_path: Path,
     gmi_shp_path: Path,
     export_nonspatial_csv_path: Path,
+    import_reviewed_gpkg_path: Path,
+    export_reviewed_formatted_gpkg_path: Path,
     overwrite: bool = False,
 ) -> None:
     print("🔌 Connecting to:", db_path)
@@ -830,6 +897,8 @@ def main(
     load_usemaps_data(db=db)
     prepare_nonspatial_list(db=db, addresses_path=addresses_path)
     export_nonspatial_list(db=db, export_csv_path=export_nonspatial_csv_path)
+    load_reviewed_data(db=db, import_gpkg_path=import_reviewed_gpkg_path)
+    export_reviewed_formatted_data(db=db, export_gpkg_path=export_reviewed_formatted_gpkg_path)
     db.close()
     print("🗄️  Shutdown complete.")
 
@@ -855,6 +924,8 @@ if __name__ == "__main__":
     pow_shp_path = db_path.parent / "granice" / "A02_Granice_powiatow.shp"
     gmi_shp_path = db_path.parent / "granice" / "A03_Granice_gmin.shp"
     export_nonspatial_csv_path = db_path.parent / "lista_tabelaryczna_2026-07-24.csv"
+    import_reviewed_gpkg_path = db_path.parent / "tab_list_20260813.gpkg"
+    export_reviewed_formatted_gpkg_path = db_path.parent / "tab_list_20260814.gpkg"
     overwrite = argv[1].lower() == "overwrite" if len(argv) > 1 else False
     main(
         db_path=db_path,
@@ -874,5 +945,7 @@ if __name__ == "__main__":
         pow_shp_path=pow_shp_path,
         gmi_shp_path=gmi_shp_path,
         export_nonspatial_csv_path=export_nonspatial_csv_path,
+        import_reviewed_gpkg_path=import_reviewed_gpkg_path,
+        export_reviewed_formatted_gpkg_path=export_reviewed_formatted_gpkg_path,
         overwrite=overwrite,
     )
