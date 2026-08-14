@@ -854,7 +854,7 @@ if __name__ == "__main__":
     woj_shp_path = db_path.parent / "granice" / "A01_Granice_wojewodztw.shp"
     pow_shp_path = db_path.parent / "granice" / "A02_Granice_powiatow.shp"
     gmi_shp_path = db_path.parent / "granice" / "A03_Granice_gmin.shp"
-    export_nonspatial_csv_path = db_path.parent / "lista_tabelaryczna_2026-07-18.csv"
+    export_nonspatial_csv_path = db_path.parent / "lista_tabelaryczna_2026-07-24.csv"
     overwrite = argv[1].lower() == "overwrite" if len(argv) > 1 else False
     main(
         db_path=db_path,
