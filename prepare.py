@@ -786,7 +786,9 @@ def load_reviewed_data(db: duckdb.DuckDBPyConnection, *, import_gpkg_path: Path)
         district,
         municipality,
         post_code as postcode,
-        object_type,
+        object_type as object_type_label,
+        split(object_type, ' - ')[1] as object_type,
+        split(object_type, ' - ')[2] as object_type_name,
         veracity_score,
         accessibility,
         state,
@@ -794,7 +796,12 @@ def load_reviewed_data(db: duckdb.DuckDBPyConnection, *, import_gpkg_path: Path)
         name,
         description,
         wikidata,
+        case when wikidata <> 'n/a' then concat('https://www.wikidata.org/wiki/', wikidata) else wikidata end wikidata_url,
         wikipedia,
+        case
+          when wikipedia <> 'n/a' then concat('https://', split(wikipedia, ':')[1], '.wikipedia.org/wiki/', url_encode(replace(split(wikipedia, ':')[2], ' ', '_')))
+          else wikipedia
+        end wikipedia_url,
         now()::date as published,
         geom
     from t positional join i
@@ -805,7 +812,7 @@ def load_reviewed_data(db: duckdb.DuckDBPyConnection, *, import_gpkg_path: Path)
 @step("export_reviewed_formatted_data")
 def export_reviewed_formatted_data(db: duckdb.DuckDBPyConnection, *, export_gpkg_path: Path) -> None:
     db.execute(
-        f"COPY (select * from list_reviewed) TO '{export_gpkg_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GPKG')"
+        f"COPY (select * exclude(object_type_label) from list_reviewed) TO '{export_gpkg_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GPKG')"
     )
 
 
