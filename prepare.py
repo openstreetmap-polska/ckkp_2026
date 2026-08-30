@@ -816,6 +816,68 @@ def export_reviewed_formatted_data(db: duckdb.DuckDBPyConnection, *, export_gpkg
     )
 
 
+@step("import_list_updates")
+def import_list_updates(db: duckdb.DuckDBPyConnection, *, csv_path: Path, gpkg_path: Path) -> None:
+    db.execute("DROP TABLE IF EXISTS list_descriptions_updates")
+    db.execute("DROP TABLE IF EXISTS list_features_updates")
+    db.execute(f"CREATE TABLE list_descriptions_updates as SELECT * FROM read_csv('{csv_path.absolute().as_uri()}')")
+    db.execute(f"CREATE TABLE list_features_updates as SELECT * FROM ST_Read('{gpkg_path.absolute().as_uri()}')")
+    db.execute("""
+CREATE TABLE list_reviewed_v2 as
+SELECT
+    ST_ASTEXT(f.geom) as wkt_wgs84,
+    ST_X(f.geom) as x_wgs84,
+    ST_Y(f.geom) as y_wgs84,
+    f.country,
+    coalesce(woj.name_woj, f.province) as province,
+    coalesce(pow.name_pow, f.district) as district,
+    coalesce(gmi.name_gmi, f.municipality) as municipality,
+    f.postcode,
+    f.object_type,
+    f.object_type_name,
+    f.veracity_score,
+    f.accessibility,
+    f.state,
+    otar_id,
+    f.name,
+    coalesce(u.description_500, f.description) as description,
+    f.wikidata,
+    case when f.wikidata <> 'n/a' then concat('https://www.wikidata.org/wiki/', f.wikidata) else f.wikidata end wikidata_url,
+    f.wikipedia,
+    case
+        when f.wikipedia <> 'n/a' then concat('https://', split(f.wikipedia, ':')[1], '.wikipedia.org/wiki/', url_encode(replace(split(f.wikipedia, ':')[2], ' ', '_')))
+        else f.wikipedia
+    end wikipedia_url,
+    f.published,
+    f.geom
+FROM list_features_updates f
+LEFT JOIN list_descriptions_updates u USING(otar_id)
+left join woj on ST_Intersects(f.geom, woj.geom)
+left join pow on ST_Intersects(f.geom, pow.geom)
+left join gmi on ST_Intersects(f.geom, gmi.geom)
+    """)
+    check_table_not_empty(db=db, table_name="list_reviewed_v2")
+
+
+@step("export_reviewed_formatted_data_v2")
+def export_reviewed_formatted_data_v2(
+    db: duckdb.DuckDBPyConnection,
+    *,
+    export_gpkg_path: Path,
+    export_geojson_path: Path,
+    export_csv_path: Path,
+) -> None:
+    db.execute(
+        f"COPY (select * from list_reviewed_v2 order by otar_id) TO '{export_gpkg_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GPKG')"
+    )
+    db.execute(
+        f"COPY (select * from list_reviewed_v2 order by otar_id) TO '{export_geojson_path.absolute().as_uri()}' WITH (FORMAT gdal, DRIVER 'GeoJSON', LAYER_CREATION_OPTIONS ('ID_GENERATE=YES'))"
+    )
+    db.execute(
+        f"COPY (select * exclude(geom) from list_reviewed_v2 order by otar_id) TO '{export_csv_path.absolute().as_uri()}' WITH (FORMAT CSV, HEADER)"
+    )
+
+
 def generate_random_ids(num_ids: int) -> list[str]:
     """Identifier generator
     CHARSET: uppercase letters excluding I and O; digits 1-9 excluding 0
@@ -854,6 +916,11 @@ def main(
     export_nonspatial_csv_path: Path,
     import_reviewed_gpkg_path: Path,
     export_reviewed_formatted_gpkg_path: Path,
+    import_descriptions_updates_path: Path,
+    import_list_updates_path: Path,
+    export_reviewed_v2_formatted_gpkg_path: Path,
+    export_reviewed_v2_formatted_geojson_path: Path,
+    export_reviewed_v2_formatted_csv_path: Path,
     overwrite: bool = False,
 ) -> None:
     print("🔌 Connecting to:", db_path)
@@ -906,6 +973,13 @@ def main(
     export_nonspatial_list(db=db, export_csv_path=export_nonspatial_csv_path)
     load_reviewed_data(db=db, import_gpkg_path=import_reviewed_gpkg_path)
     export_reviewed_formatted_data(db=db, export_gpkg_path=export_reviewed_formatted_gpkg_path)
+    import_list_updates(db=db, csv_path=import_descriptions_updates_path, gpkg_path=import_list_updates_path)
+    export_reviewed_formatted_data_v2(
+        db=db,
+        export_gpkg_path=export_reviewed_v2_formatted_gpkg_path,
+        export_geojson_path=export_reviewed_v2_formatted_geojson_path,
+        export_csv_path=export_reviewed_v2_formatted_csv_path,
+    )
     db.close()
     print("🗄️  Shutdown complete.")
 
@@ -933,6 +1007,11 @@ if __name__ == "__main__":
     export_nonspatial_csv_path = db_path.parent / "lista_tabelaryczna_2026-07-24.csv"
     import_reviewed_gpkg_path = db_path.parent / "tab_list_20260813.gpkg"
     export_reviewed_formatted_gpkg_path = db_path.parent / "tab_list_20260814.gpkg"
+    import_descriptions_updates_path = db_path.parent / "tab_list_updates.csv"
+    import_list_updates_path = db_path.parent / "tab_list_20260814_updated.gpkg"
+    export_reviewed_v2_formatted_gpkg_path = db_path.parent / "tab_list_20260830.gpkg"
+    export_reviewed_v2_formatted_geojson_path = db_path.parent / "tab_list_20260830.geojson"
+    export_reviewed_v2_formatted_csv_path = db_path.parent / "tab_list_20260830.csv"
     overwrite = argv[1].lower() == "overwrite" if len(argv) > 1 else False
     main(
         db_path=db_path,
@@ -954,5 +1033,10 @@ if __name__ == "__main__":
         export_nonspatial_csv_path=export_nonspatial_csv_path,
         import_reviewed_gpkg_path=import_reviewed_gpkg_path,
         export_reviewed_formatted_gpkg_path=export_reviewed_formatted_gpkg_path,
+        import_descriptions_updates_path=import_descriptions_updates_path,
+        import_list_updates_path=import_list_updates_path,
+        export_reviewed_v2_formatted_gpkg_path=export_reviewed_v2_formatted_gpkg_path,
+        export_reviewed_v2_formatted_geojson_path=export_reviewed_v2_formatted_geojson_path,
+        export_reviewed_v2_formatted_csv_path=export_reviewed_v2_formatted_csv_path,
         overwrite=overwrite,
     )
